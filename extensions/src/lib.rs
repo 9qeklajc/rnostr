@@ -21,6 +21,11 @@ pub mod search;
 #[cfg(feature = "search")]
 pub use search::Search;
 
+pub mod search_client;
+
+pub mod external_search;
+pub use external_search::ExternalSearch;
+
 #[cfg(test)]
 pub fn temp_data_path(p: &str) -> anyhow::Result<tempfile::TempDir> {
     Ok(tempfile::Builder::new()

@@ -12,6 +12,8 @@ authors.workspace = true
 [dependencies]
 
 nostr-relay = { version = "0.4.8", path = "../relay" }
+nostr-db = { version = "0.4.5", path = "../db" }
+hex = "0.4.3"
 metrics = "0.23.0"
 metrics-exporter-prometheus = { version = "0.15.3", optional = true, default-features = false, features = [
     "push-gateway",
@@ -25,6 +27,12 @@ actix-web = "4.9.0"
 parking_lot = "0.12.3"
 tracing = "0.1.40"
 governor = { version = "0.6.3", optional = true }
+anyhow = "1.0"
+reqwest = { version = "0.12", features = ["json"] }
+ureq = { version = "3.1", features = ["json"] }
+urlencoding = "2.1"
+
+lancedb-search = { path ="../../lancedb-search/" }
 
 [features]
 default = ["metrics", "rate_limiter", "count", "search"]
@@ -37,7 +45,6 @@ count = []
 actix-rt = "2.10.0"
 actix-test = "0.1.5"
 actix-web-actors = "4.3.1"
-anyhow = "1.0.86"
 bytes = "1.7.1"
 futures-util = "0.3.30"
 temp-env = "0.3.6"

@@ -36,6 +36,7 @@ pub async fn relay(config: &PathBuf, watch: bool) -> Result<()> {
         .add_extension(nostr_extensions::Ratelimiter::new())
         .add_extension(nostr_extensions::Count::new(db))
         .add_extension(nostr_extensions::Search::new())
+        .add_extension(nostr_extensions::ExternalSearch::new())
         .web_server()?
         .await?;
     info!("Relay server shutdown");

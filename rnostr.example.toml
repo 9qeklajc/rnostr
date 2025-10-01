@@ -144,3 +144,13 @@ enabled = false
 # use carefully. see README.md#search
 [search]
 enabled = false
+
+# External Search Service extension
+[external_search]
+enabled = false
+endpoint = "http://localhost:9200/nostr/_search"
+timeout = "5s"
+fallback_to_local = true
+max_results = 1000
+# consider using authorization
+# auth_token = "Bearer your_token_here"

@@ -8,6 +8,7 @@ use serde::Deserialize;
 #[derive(Deserialize, Default, Debug)]
 pub struct SearchSetting {
     pub enabled: bool,
+    pub endpoint: Option<String>,
 }
 
 #[derive(Default, Debug)]
@@ -40,7 +41,7 @@ impl Extension for Search {
         _session: &mut Session,
         _ctx: &mut <Session as actix::Actor>::Context,
     ) -> ExtensionMessageResult {
-        if self.setting.enabled {
+        if self.setting.enabled && self.setting.endpoint.is_none() {
             match &mut msg.msg {
                 IncomingMessage::Event(event) => {
                     event.build_note_words();
