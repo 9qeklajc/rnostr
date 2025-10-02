@@ -32,8 +32,6 @@ reqwest = { version = "0.12", features = ["json"] }
 ureq = { version = "3.1", features = ["json"] }
 urlencoding = "2.1"
 
-lancedb-search = { path ="../../lancedb-search/" }
-
 [features]
 default = ["metrics", "rate_limiter", "count", "search"]
 search = ["nostr-relay/search"]
