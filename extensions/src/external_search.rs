@@ -89,6 +89,11 @@ impl Extension for ExternalSearch {
                                     match client.search_events_blocking(&search_request) {
                                         Ok(search_response) => {
                                             if !search_response.event_ids.is_empty() {
+                                                println!(
+                                                    "External search found {} events: {:?}",
+                                                    search_response.event_ids.len(),
+                                                    search_response
+                                                );
                                                 let mut event_id_arrays = Vec::new();
                                                 for event_id_hex in &search_response.event_ids {
                                                     if let Ok(event_id_bytes) =
@@ -103,6 +108,7 @@ impl Extension for ExternalSearch {
                                                 }
 
                                                 if !event_id_arrays.is_empty() {
+                                                    println!("Converted {} external event IDs for local lookup", event_id_arrays.len());
                                                     filter.search = None;
                                                     filter.ids = SortList::from(event_id_arrays);
                                                     filter.authors = SortList::from(vec![]);
@@ -110,11 +116,32 @@ impl Extension for ExternalSearch {
                                                     filter.since = None;
                                                     filter.until = None;
                                                     filter.tags.clear();
+                                                    filter.limit = Some(100);
                                                     filter.desc = false;
                                                 }
+                                            } else if self.setting.fallback_to_local.unwrap_or(true)
+                                            {
+                                                println!("External search returned no results, falling back to local search");
+                                                // Keep the original search filter for local search
+                                            } else {
+                                                println!("External search returned no results, and fallback_to_local is disabled");
+                                                // Clear search to return no results
+                                                filter.search = None;
+                                                filter.ids = SortList::from(vec![]);
                                             }
                                         }
-                                        Err(_) => {}
+                                        Err(e) => {
+                                            println!("External search failed: {:?}", e);
+                                            if self.setting.fallback_to_local.unwrap_or(true) {
+                                                println!("Falling back to local search due to external search error");
+                                                // Keep the original search filter for local search
+                                            } else {
+                                                println!("Fallback to local search is disabled, clearing search");
+                                                // Clear search to return no results
+                                                filter.search = None;
+                                                filter.ids = SortList::from(vec![]);
+                                            }
+                                        }
                                     }
                                 }
                             }
