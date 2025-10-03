@@ -17,6 +17,11 @@ impl<T: Ord> From<Vec<T>> for SortList<T> {
 }
 
 impl<T: Ord> SortList<T> {
+    /// Create a SortList preserving the original order (for external search results)
+    pub fn new_unsorted(value: Vec<T>) -> Self {
+        Self(value)
+    }
+
     pub fn contains(&self, item: &T) -> bool {
         self.binary_search(item).is_ok()
     }

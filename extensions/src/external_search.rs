@@ -110,24 +110,24 @@ impl Extension for ExternalSearch {
                                                 if !event_id_arrays.is_empty() {
                                                     println!("Converted {} external event IDs for local lookup", event_id_arrays.len());
                                                     filter.search = None;
-                                                    filter.ids = SortList::from(event_id_arrays);
+                                                    // Preserve order from external search by avoiding SortList::from() which sorts
+                                                    filter.ids = nostr_db::SortList::new_unsorted(
+                                                        event_id_arrays,
+                                                    );
                                                     filter.authors = SortList::from(vec![]);
                                                     filter.kinds = SortList::from(vec![]);
                                                     filter.since = None;
                                                     filter.until = None;
                                                     filter.tags.clear();
-                                                    filter.limit = Some(100);
+                                                    filter.limit = Some(200);
                                                     filter.desc = false;
                                                 }
-                                            } else if self.setting.fallback_to_local.unwrap_or(true)
-                                            {
-                                                println!("External search returned no results, falling back to local search");
-                                                // Keep the original search filter for local search
                                             } else {
                                                 println!("External search returned no results, and fallback_to_local is disabled");
                                                 // Clear search to return no results
                                                 filter.search = None;
                                                 filter.ids = SortList::from(vec![]);
+                                                filter.limit = Some(0);
                                             }
                                         }
                                         Err(e) => {
@@ -140,6 +140,7 @@ impl Extension for ExternalSearch {
                                                 // Clear search to return no results
                                                 filter.search = None;
                                                 filter.ids = SortList::from(vec![]);
+                                                filter.limit = Some(0);
                                             }
                                         }
                                     }
