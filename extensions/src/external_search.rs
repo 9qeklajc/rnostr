@@ -110,7 +110,8 @@ impl Extension for ExternalSearch {
                                                 if !event_id_arrays.is_empty() {
                                                     println!("Converted {} external event IDs for local lookup", event_id_arrays.len());
                                                     filter.search = None;
-                                                    // Preserve order from external search by avoiding SortList::from() which sorts
+                                                    // Reverse order from external search to get original relevance order
+                                                    event_id_arrays.reverse();
                                                     filter.ids = nostr_db::SortList::new_unsorted(
                                                         event_id_arrays,
                                                     );
