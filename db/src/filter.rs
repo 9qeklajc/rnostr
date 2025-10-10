@@ -114,11 +114,30 @@ impl TryFrom<_Filter> for Filter {
             search = Some(filter.keywords.join(" "));
         }
 
-        // only use valid tag, has prefix "#", string item, not empty
+        // Handle tags and geohash prefix queries
         let mut tags = HashMap::new();
         for item in filter.tags {
             let key = item.0;
-            if let Some(key) = key.strip_prefix('#') {
+
+            // Handle geohash prefix queries (#g^ and #g^N)
+            if key == "#g^" || (key.starts_with("#g^") && key.len() > 3 && key[3..].parse::<u8>().is_ok()) {
+                // Convert geohash prefix to special g-tag entries
+                let values = if key == "#g^" {
+                    // #g^ = prefix search without length constraint
+                    let val = Vec::<String>::deserialize(&item.1)?;
+                    val.into_iter().map(|prefix| format!("^{}", prefix)).collect::<Vec<_>>()
+                } else {
+                    // #g^N = prefix search with max length N
+                    let max_len = key[3..].parse::<u8>().unwrap();
+                    let val = Vec::<String>::deserialize(&item.1)?;
+                    val.into_iter().map(|prefix| format!("^{}:{}", prefix, max_len)).collect::<Vec<_>>()
+                };
+
+                if !values.is_empty() {
+                    let list = values.into_iter().map(|s| s.into_bytes()).collect::<Vec<_>>();
+                    tags.insert(b"g".to_vec(), list.into());
+                }
+            } else if let Some(key) = key.strip_prefix('#') {
                 let key = key.as_bytes();
                 // only index for key len 1
                 if key.len() == 1 {
@@ -267,10 +286,49 @@ impl Filter {
             return false;
         }
         for tag in tags {
-            if tag.0.as_ref() == name && list.contains2(tag.1.as_ref()) {
-                return true;
+            if tag.0.as_ref() == name {
+                // Check for exact match first
+                if list.contains2(tag.1.as_ref()) {
+                    return true;
+                }
+
+                // Handle geohash prefix matching for g-tags
+                if name == b"g" {
+                    let tag_value = tag.1.as_ref();
+                    for filter_value in list.iter() {
+                        if Self::matches_geohash_prefix(tag_value, filter_value) {
+                            return true;
+                        }
+                    }
+                }
             }
         }
+        false
+    }
+
+    /// Check if a geohash tag value matches a prefix pattern
+    fn matches_geohash_prefix(tag_value: &[u8], filter_value: &[u8]) -> bool {
+        // Check if this is a prefix pattern (starts with ^)
+        if !filter_value.starts_with(b"^") {
+            return false;
+        }
+
+        let pattern = &filter_value[1..]; // Remove ^ prefix
+
+        if let Some(colon_pos) = pattern.iter().position(|&b| b == b':') {
+            // Format: ^prefix:max_length
+            let prefix = &pattern[..colon_pos];
+            if let Ok(max_len_str) = std::str::from_utf8(&pattern[colon_pos + 1..]) {
+                if let Ok(max_len) = max_len_str.parse::<usize>() {
+                    // Check prefix match and length constraint
+                    return tag_value.starts_with(prefix) && tag_value.len() <= max_len;
+                }
+            }
+        } else {
+            // Format: ^prefix (no length constraint)
+            return tag_value.starts_with(pattern);
+        }
+
         false
     }
 
@@ -596,6 +654,61 @@ mod tests {
             ]
             .into()
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn test_geohash_prefix_parsing() -> Result<()> {
+        // Test basic #g^ parsing with array format
+        let note = r##"{"#g^": ["abc"]}"##;
+        let filter: Filter = serde_json::from_str(note)?;
+        assert!(filter.tags.contains_key(&b"g".to_vec()));
+        let g_values = filter.tags.get(&b"g".to_vec()).unwrap();
+        assert!(g_values.contains(&b"^abc".to_vec()));
+
+        // Test #g^N parsing with length constraint
+        let note = r##"{"#g^6": ["def"]}"##;
+        let filter: Filter = serde_json::from_str(note)?;
+        let g_values = filter.tags.get(&b"g".to_vec()).unwrap();
+        assert!(g_values.contains(&b"^def:6".to_vec()));
+
+        // Test multiple geohash prefixes
+        let note = r##"{"#g^": ["abc", "xyz"]}"##;
+        let filter: Filter = serde_json::from_str(note)?;
+        let g_values = filter.tags.get(&b"g".to_vec()).unwrap();
+        assert!(g_values.contains(&b"^abc".to_vec()));
+        assert!(g_values.contains(&b"^xyz".to_vec()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_geohash_prefix_matching() -> Result<()> {
+        // Create a mock event with geohash tags
+        let event_tags = vec![
+            (b"g".to_vec(), b"abcde".to_vec()),
+            (b"g".to_vec(), b"xyz123".to_vec()),
+            (b"t".to_vec(), b"nostr".to_vec()),
+        ];
+
+        // Test prefix matching without length constraint
+        assert!(Filter::matches_geohash_prefix(b"abcde", b"^abc"));
+        assert!(Filter::matches_geohash_prefix(b"abcdefg", b"^abc"));
+        assert!(!Filter::matches_geohash_prefix(b"xyzde", b"^abc"));
+
+        // Test prefix matching with length constraint
+        assert!(Filter::matches_geohash_prefix(b"abc", b"^ab:3"));
+        assert!(Filter::matches_geohash_prefix(b"ab", b"^ab:3"));
+        assert!(!Filter::matches_geohash_prefix(b"abcd", b"^ab:3")); // too long
+        assert!(!Filter::matches_geohash_prefix(b"xyz", b"^ab:3")); // wrong prefix
+
+        // Test tag_contains with geohash prefixes
+        let filter_values = vec![b"^abc".to_vec(), b"^xyz:6".to_vec()].into();
+        assert!(Filter::tag_contains(&event_tags, b"g", &filter_values));
+
+        let filter_values_no_match = vec![b"^def".to_vec()].into();
+        assert!(!Filter::tag_contains(&event_tags, b"g", &filter_values_no_match));
+
         Ok(())
     }
 }

@@ -1,6 +1,6 @@
 use crate::{
     error::Error,
-    key::{concat, concat_sep, encode_replace_key, u16_to_ver, u64_to_ver, IndexKey},
+    key::{concat, concat_sep, encode_replace_key, u16_to_ver, u64_to_ver, IndexKey, VIEW_KEY_SEP},
     ArchivedEventIndex, Event, EventIndex, Filter, FromEventData, Stats,
 };
 use nostr_kv::{
@@ -96,6 +96,15 @@ fn encode_event(event: &Event) -> Result<String> {
 }
 
 impl Db {
+    /// Check if filter contains geohash prefix queries that can be optimized
+    fn has_geohash_prefix_query(filter: &Filter) -> bool {
+        if let Some(g_tags) = filter.tags.get(&b"g".to_vec()) {
+            // Check if any g-tag values start with ^ (our prefix marker)
+            return g_tags.iter().any(|value| value.starts_with(b"^"));
+        }
+        false
+    }
+
     fn del_event(&self, writer: &mut Writer, event: &Event, uid: &[u8]) -> Result<(), Error> {
         let index_event = event.index();
         let time = index_event.created_at();
@@ -610,12 +619,22 @@ impl Db {
             };
             Iter::new_prefix(self, txn, filter, &filter.ids, &self.t_id, match_index)
         } else if !filter.tags.is_empty() {
-            let match_index = if !filter.authors.is_empty() {
-                MatchIndex::Pubkey
+            // Check if this is a geohash prefix query that can be optimized
+            if Self::has_geohash_prefix_query(filter) {
+                let match_index = if !filter.authors.is_empty() {
+                    MatchIndex::Pubkey
+                } else {
+                    MatchIndex::None
+                };
+                Iter::new_geohash_prefix(self, txn, filter, &self.t_tag, match_index)
             } else {
-                MatchIndex::None
-            };
-            Iter::new_tag(self, txn, filter, &self.t_tag, match_index)
+                let match_index = if !filter.authors.is_empty() {
+                    MatchIndex::Pubkey
+                } else {
+                    MatchIndex::None
+                };
+                Iter::new_tag(self, txn, filter, &self.t_tag, match_index)
+            }
         } else if !filter.authors.is_empty() && !filter.kinds.is_empty() {
             Iter::new_author_kind(self, txn, filter, &self.t_pubkey_kind, MatchIndex::None)
         } else if !filter.authors.is_empty() {
@@ -830,6 +849,169 @@ where
             group.add(Box::new(scanner))?;
         }
         Self::new(kv_db, reader, filter, group, match_index)
+    }
+
+    /// Optimized method for geohash prefix queries
+    fn new_geohash_prefix(
+        kv_db: &Db,
+        reader: &'txn R,
+        filter: &Filter,
+        view: &Tree,
+        match_index: MatchIndex,
+    ) -> Result<Self, Error> {
+        let mut group = Group::new(filter.desc, true, false);
+        let has_kind = !filter.kinds.is_empty();
+
+        // Process g-tags with prefix patterns
+        if let Some(g_tags) = filter.tags.get(&b"g".to_vec()) {
+            let mut sub = Group::new(filter.desc, false, true);
+
+            for pattern in g_tags.iter() {
+                if pattern.starts_with(b"^") {
+                    // Extract prefix and optional length constraint
+                    let pattern_str = &pattern[1..]; // Remove ^ marker
+                    let (prefix, max_length) = if let Some(colon_pos) = pattern_str.iter().position(|&b| b == b':') {
+                        // Format: ^prefix:max_length
+                        let prefix = &pattern_str[..colon_pos];
+                        let max_len_str = &pattern_str[colon_pos + 1..];
+                        let max_len = if let Ok(s) = std::str::from_utf8(max_len_str) {
+                            s.parse::<usize>().ok()
+                        } else {
+                            None
+                        };
+                        (prefix, max_len)
+                    } else {
+                        // Format: ^prefix (no length constraint)
+                        (pattern_str, None)
+                    };
+
+                    let kinds = filter.kinds.clone();
+                    let prefix_owned = prefix.to_vec();
+                    let max_length_owned = max_length;
+
+                    // Create optimized range query for this geohash prefix
+                    // Key format: g[sep]geohash_prefix[sep]timestamp
+                    let range_start = concat_sep(b"g", &prefix_owned);
+                    let _range_end = if let Some(next_prefix) = Self::next_prefix(&prefix_owned) {
+                        concat_sep(b"g", next_prefix)
+                    } else {
+                        // If we can't create next prefix, use the original prefix with max timestamp
+                        let mut end_key = range_start.clone();
+                        end_key.extend_from_slice(&VIEW_KEY_SEP);
+                        end_key.extend_from_slice(&u64::MAX.to_be_bytes());
+                        end_key
+                    };
+
+                    let iter = create_iter(reader, view, &range_start, filter.desc);
+
+                    let scanner = Scanner::new(
+                        iter,
+                        vec![],
+                        range_start.clone(),
+                        filter.desc,
+                        filter.since,
+                        filter.until,
+                        Box::new(move |_s, r| {
+                            let k = r.0;
+                            let v = r.1;
+
+                            // Parse the key to extract geohash value
+                            if let Some(geohash_value) = Self::extract_geohash_from_key(k) {
+                                // Check prefix match and length constraint
+                                if geohash_value.starts_with(&prefix_owned) {
+                                    if let Some(max_len) = max_length_owned {
+                                        if geohash_value.len() > max_len {
+                                            return Ok(MatchResult::Continue);
+                                        }
+                                    }
+
+                                    // Apply kind filter if needed
+                                    if has_kind && !Filter::match_kind(&kinds, u16_from_bytes(&v[8..10])?) {
+                                        Ok(MatchResult::Continue)
+                                    } else {
+                                        Ok(MatchResult::Found(IndexKey::from(k, v)?))
+                                    }
+                                } else {
+                                    Ok(MatchResult::Continue)
+                                }
+                            } else {
+                                Ok(MatchResult::Continue)
+                            }
+                        }),
+                    );
+                    sub.add(Box::new(scanner))?;
+                }
+            }
+            group.add(Box::new(sub))?;
+        }
+
+        // Handle other non-geohash tags normally
+        for tag in filter.tags.iter() {
+            if tag.0 == b"g" {
+                continue; // Already handled above
+            }
+
+            let mut sub = Group::new(filter.desc, false, true);
+            for key in tag.1.iter() {
+                let kinds = filter.kinds.clone();
+                let prefix = concat_sep(concat_sep(tag.0, key), vec![]);
+                let klen = prefix.len() + 8;
+                let iter = create_iter(reader, view, &prefix, filter.desc);
+
+                let scanner = Scanner::new(
+                    iter,
+                    vec![],
+                    prefix,
+                    filter.desc,
+                    filter.since,
+                    filter.until,
+                    Box::new(move |s, r| {
+                        let k = r.0;
+                        let v = r.1;
+                        Ok(if k.len() == klen && k.starts_with(&s.prefix) {
+                            if has_kind && !Filter::match_kind(&kinds, u16_from_bytes(&v[8..10])?) {
+                                MatchResult::Continue
+                            } else {
+                                MatchResult::Found(IndexKey::from(k, v)?)
+                            }
+                        } else {
+                            MatchResult::Stop
+                        })
+                    }),
+                );
+                sub.add(Box::new(scanner))?;
+            }
+            group.add(Box::new(sub))?;
+        }
+
+        Self::new(kv_db, reader, filter, group, match_index)
+    }
+
+    /// Extract geohash value from a tag key
+    fn extract_geohash_from_key(key: &[u8]) -> Option<&[u8]> {
+        // Key format: g[sep]geohash_value[sep]timestamp
+        if key.len() < 10 || key[0] != b'g' || key[1] != 0 {
+            return None;
+        }
+
+        let geohash_start = 2; // After "g" + separator
+        if let Some(second_sep_pos) = key[geohash_start..].iter().position(|&b| b == 0) {
+            Some(&key[geohash_start..geohash_start + second_sep_pos])
+        } else {
+            None
+        }
+    }
+
+    /// Get the next lexicographical prefix for range queries
+    fn next_prefix(prefix: &[u8]) -> Option<Vec<u8>> {
+        for i in (0..prefix.len()).rev() {
+            if prefix[i] < 255 {
+                let mut next = prefix[..i].to_vec();
+                next.push(prefix[i] + 1);
+                return Some(next);
+            }
+        }
+        None
     }
 
     fn new_tag(

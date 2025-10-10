@@ -1,148 +1,66 @@
-# Rnostr
+# rnostr-geo
 
-A high-performance and scalable [nostr](https://github.com/nostr-protocol/nostr) relay written in Rust.
+A fork of [rnostr](https://github.com/rnostr/rnostr) with **geohash prefix search** functionality added.
 
-## Features
+## What's Added
 
-- [Most NIPs support](#nips)
-- Easy to use, no third-party service dependencies
-- High performance, Events is stored in [LMDB](https://github.com/LMDB/lmdb), Inspired by [strfry](https://github.com/hoytech/strfry)
-- Most configurations can be hot reloaded
-- Scalability, can be used as a library to [create custom relays](./relay/README.md)
+This fork adds **geohash prefix search** capabilities to the rnostr relay, enabling efficient location-based queries using geohash tags.
 
-### [NIPs](https://github.com/nostr-protocol/nips)
+### ✨ New Features
 
-- [x] NIP-01: Basic protocol flow description
-- [x] NIP-02: Contact list and petnames
-- [x] NIP-04: Encrypted Direct Message
-- [x] NIP-09: Event deletion
-- [x] NIP-11: Relay information document
-- [x] NIP-12: Generic tag queries
-- [ ] NIP-13: Proof of Work
-- [x] NIP-15: End of Stored Events Notice
-- [x] NIP-16: Event Treatment
-- [x] NIP-20: Command Results
-- [x] NIP-22: Event `created_at` Limits
-- [x] NIP-25: Reactions
-- [x] NIP-26: Delegated Event Signing
-- [x] NIP-28: Public Chat
-- [x] NIP-33: Parameterized Replaceable Events
-- [x] NIP-40: Expiration Timestamp
-- [x] NIP-42: Authentication of clients to relays
-- [x] NIP-45: Counting results. [experimental](#count)
-- [x] NIP-50: Keywords filter. [experimental](#search)
-- [x] NIP-70: Protected Events
+- **Geohash Prefix Queries**: Search for events by geohash prefix patterns
+- **Length-Constrained Search**: Limit search by maximum geohash length
+- **Optimized Database Queries**: Efficient LMDB range queries for prefix matching
+- **Proper Validation**: Validates geohash characters and format
 
-### Extensions
+### 🔍 Query Syntax
 
-The library [nostr-relay](./relay/) implements a simple extension mechanism to intercept user messages for custom processing. rnostr is built on top of [nostr-relay](./relay/) and implements several simple extensions.
-All extensions support configuration in the [config file](./rnostr.example.toml).
-
-[Custom relay and extensions](./relay/).
-
-#### Metrics
-
-Provide metrics url for [prometheus](https://prometheus.io/) scrape
-
-#### Auth
-
-[NIP-42](https://nips.be/42) Authentication, ip, auth pubkey and event pubkey whitelist blacklist
-
-#### Rate limiter
-
-Limit event write frequency.
-
-#### Count
-
-[NIP-45](https://nips.be/45) count results.
-When the query results are too large (millions) will trigger a slow query. `setting.data.db_query_timeout`.
-
-#### Search
-
-[NIP-50](https://nips.be/50) Keywords filter. [nostr-db](./db/) implement a simple exact match pattern, case-insensitive, time-sorted full-text search. No performance optimization for multi-word queries, so it's experimental.
-
-It reduces write concurrency and makes space usage significantly larger. So it is suitable for use in private or paid relay.
-
-Now we only index the content of `kind: 1` note event.
-
-## Usage
-
-### Prepare source and config
-
-```shell
-
-git clone https://github.com/rnostr/rnostr.git
-cd rnostr
-mkdir config
-cp ./rnostr.example.toml ./config/rnostr.toml
-
+```json
+{"#g^": ["u"]}           // Find all geohashes starting with "u"
+{"#g^": ["u1", "9q"]}    // Find geohashes starting with "u1" OR "9q"
+{"#g^6": ["u12"]}        // Find geohashes starting with "u12", max length 6
 ```
 
-Edit the `./config/rnostr.toml`, remember to modify network.host to `0.0.0.0` for public access.
+### 📍 Example Use Cases
 
-### Build and run
+```bash
+# Find all events in San Francisco area (geohash prefix "u1")
+nak req -t g^=u1 ws://localhost:8080
 
-```shell
-
-# Build
-cargo build --release
-
-# Show help
-./target/release/rnostr relay --help
-
-# Run with config hot reload
-./target/release/rnostr relay -c ./config/rnostr.toml --watch
-
+# Find events in broader SF Bay Area with length limit
+nak req -t g^4=u1 ws://localhost:8080
 ```
 
-### Docker
+## Quick Start
 
-```shell
+### Prerequisites
 
-# Create data dir
-mkdir ./data
+- Rust toolchain
+- [nak](https://github.com/fiatjaf/nak) tool for testing
+- [just](https://github.com/casey/just) command runner (optional)
 
-docker run -it --rm -p 8080:8080 \
-  --user=$(id -u) \
-  -v $(pwd)/data:/rnostr/data \
-  -v $(pwd)/config:/rnostr/config \
-  --name rnostr rnostr/rnostr:latest
+## Implementation Details
 
+### Files Modified
+
+- `db/src/filter.rs`: Filter parsing and validation
+- `db/src/db.rs`: Database query optimization
+
+## Testing
+
+```bash
+# Run geohash prefix search test
+just test-prefix
+
+# Full automated test workflow
+just test-full
 ```
 
-Build by self
+## License
 
-```shell
+MIT OR Apache-2.0 (same as original rnostr project)
 
-docker build . -t rnostr/rnostr
-
-# Build in China need to configure the mirror.
-docker build . -t rnostr/rnostr --build-arg BASE=mirror_cn
-
-```
-
-See docker compose [example](./docker-compose.yml)
-
-### Commands
-
-rnostr provides other commands such as import and export.
-
-```shell
-
-./target/release/rnostr --help
-
-# Usage: rnostr <COMMAND>
-
-# Commands:
-#   import  Import data from jsonl file
-#   export  Export data to jsonl file
-#   bench   Benchmark filter
-#   relay   Start nostr relay server
-#   delete  Delete data by filter
-#   help    Print this message or the help of the given subcommand(s)
-
-# Options:
-#   -h, --help     Print help
-#   -V, --version  Print version
-
-```
+## Geohash Resources
+- [Geohash Wikipedia](https://en.wikipedia.org/wiki/Geohash)
+- [Geohash Algorithm](https://www.movable-type.co.uk/scripts/geohash.html)
+- [Geohash Explorer](https://geohash.softeng.co/)
