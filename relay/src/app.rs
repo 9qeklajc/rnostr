@@ -156,7 +156,9 @@ impl App {
         let db = Arc::new(Db::open(path)?);
         db.check_schema()?;
 
-        let server = Server::create_with(db.clone(), setting.clone());
+        let server = Server::create_with_extensions(
+            db.clone(), setting.clone(), Arc::clone(&extensions),
+        );
 
         Ok(Self {
             server,

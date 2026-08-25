@@ -50,6 +50,12 @@ pub trait Extension: Send + Sync {
     ) -> ExtensionMessageResult {
         ExtensionMessageResult::Continue(msg)
     }
+
+    /// Called only after a valid, non-duplicate event was committed to the DB.
+    /// External index/search extensions should ingest here rather than in
+    /// `message()`, so rejected/replaced events never reach remote stores.
+    #[allow(unused_variables)]
+    fn event_written(&self, event: &crate::db::Event) {}
 }
 
 /// extensions
@@ -116,5 +122,11 @@ impl Extensions {
             };
         }
         ExtensionMessageResult::Continue(msg)
+    }
+
+    pub fn call_event_written(&self, event: &crate::db::Event) {
+        for ext in &self.list {
+            ext.event_written(event);
+        }
     }
 }

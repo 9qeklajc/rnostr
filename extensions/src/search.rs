@@ -1,23 +1,90 @@
+use actix::{Actor, ActorFutureExt, AsyncContext, WrapFuture};
 use nostr_relay::{
-    message::{ClientMessage, IncomingMessage},
+    message::{ClientMessage, IncomingMessage, OutgoingMessage},
     setting::SettingWrapper,
     Extension, ExtensionMessageResult, Session,
 };
 use serde::Deserialize;
+use serde_json::{json, Value};
+use std::time::Duration;
+use tracing::warn;
 
-#[derive(Deserialize, Default, Debug)]
-pub struct SearchSetting {
-    pub enabled: bool,
+fn default_namespace() -> String {
+    "nostr".to_owned()
+}
+fn default_timeout_ms() -> u64 {
+    10_000
 }
 
-#[derive(Default, Debug)]
+/// NIP-50 search configuration.
+///
+/// Without `service_url`, behavior is unchanged: rnostr's local keyword index
+/// handles search. With a URL, committed events are mirrored to the service and
+/// NIP-50 REQs are answered by it. The service itself is generic; only its
+/// `/v1/adapters/nostr/*` adapter is used here.
+#[derive(Deserialize, Debug)]
+#[serde(default)]
+pub struct SearchSetting {
+    pub enabled: bool,
+    pub service_url: Option<String>,
+    pub service_token: Option<String>,
+    pub namespace: String,
+    pub timeout_ms: u64,
+}
+
+impl Default for SearchSetting {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            service_url: None,
+            service_token: None,
+            namespace: default_namespace(),
+            timeout_ms: default_timeout_ms(),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct Search {
     setting: SearchSetting,
+    client: reqwest::Client,
+}
+
+impl Default for Search {
+    fn default() -> Self {
+        Self { setting: SearchSetting::default(), client: reqwest::Client::new() }
+    }
+}
+
+#[derive(Deserialize)]
+struct RemoteHit {
+    event: Value,
+}
+
+#[derive(Deserialize)]
+struct RemoteSearchResponse {
+    results: Vec<RemoteHit>,
 }
 
 impl Search {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn endpoint(&self, path: &str) -> Option<String> {
+        self.setting.service_url.as_ref().map(|u| {
+            format!("{}{}", u.trim_end_matches('/'), path)
+        })
+    }
+
+    fn request(&self, method: reqwest::Method, url: String) -> reqwest::RequestBuilder {
+        let req = self.client.request(method, url)
+            .timeout(Duration::from_millis(self.setting.timeout_ms));
+        if let Some(token) = &self.setting.service_token {
+            req.bearer_auth(token)
+        } else {
+            req
+        }
     }
 }
 
@@ -37,23 +104,96 @@ impl Extension for Search {
     fn message(
         &self,
         mut msg: ClientMessage,
-        _session: &mut Session,
-        _ctx: &mut <Session as actix::Actor>::Context,
+        session: &mut Session,
+        ctx: &mut <Session as Actor>::Context,
     ) -> ExtensionMessageResult {
-        if self.setting.enabled {
-            match &mut msg.msg {
-                IncomingMessage::Event(event) => {
-                    event.build_note_words();
-                }
-                IncomingMessage::Req(sub) => {
-                    for filter in &mut sub.filters {
-                        filter.build_words();
-                    }
-                }
-                _ => {}
+        if !self.setting.enabled {
+            return ExtensionMessageResult::Continue(msg);
+        }
+
+        match &mut msg.msg {
+            IncomingMessage::Event(event) => {
+                // Keep local NIP-50 indexing behavior. Remote ingest happens in
+                // event_written(), after the event is actually committed.
+                event.build_note_words();
             }
+            IncomingMessage::Req(sub) => {
+                for filter in &mut sub.filters {
+                    filter.build_words();
+                }
+
+                let Some(url) = self.endpoint("/v1/adapters/nostr/search") else {
+                    return ExtensionMessageResult::Continue(msg);
+                };
+                let Some(filter) = sub.filters.iter().find(|f| f.search.is_some()) else {
+                    return ExtensionMessageResult::Continue(msg);
+                };
+                let query = filter.search.clone().unwrap_or_default();
+                let sub_id = sub.id.clone();
+                let limit = filter.limit.unwrap_or(20).min(500);
+
+                // Preserve the original NIP-01/50 filter JSON rather than
+                // teaching the generic service about rnostr's Rust Filter type.
+                let filter_json = serde_json::from_str::<Value>(&msg.text)
+                    .ok()
+                    .and_then(|v| v.as_array().cloned())
+                    .and_then(|a| a.into_iter().skip(2).find(|v| {
+                        v.get("search").and_then(Value::as_str).is_some()
+                    }))
+                    .unwrap_or_else(|| json!({"search": query, "limit": limit}));
+                let body = json!({
+                    "query": query,
+                    "filter": filter_json,
+                    "limit": limit,
+                    "namespace": self.setting.namespace,
+                });
+                let req = self.request(reqwest::Method::POST, url).json(&body);
+                let future = async move {
+                    let response = req.send().await.map_err(|e| e.to_string())?;
+                    if !response.status().is_success() {
+                        return Err(format!("memory service HTTP {}", response.status()));
+                    }
+                    response.json::<RemoteSearchResponse>().await.map_err(|e| e.to_string())
+                };
+                ctx.spawn(future.into_actor(session).map(move |result, _session, ctx| {
+                    match result {
+                        Ok(response) => {
+                            for hit in response.results {
+                                ctx.text(OutgoingMessage::event(&sub_id, &hit.event.to_string()));
+                            }
+                            ctx.text(OutgoingMessage::eose(&sub_id));
+                        }
+                        Err(err) => {
+                            ctx.text(OutgoingMessage::closed(
+                                &sub_id, &format!("remote-search: {}", err),
+                            ));
+                        }
+                    }
+                }));
+                return ExtensionMessageResult::Ignore;
+            }
+            _ => {}
         }
         ExtensionMessageResult::Continue(msg)
+    }
+
+    fn event_written(&self, event: &nostr_relay::db::Event) {
+        let Some(url) = self.endpoint("/v1/adapters/nostr/events") else {
+            return;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&event.to_string()) else {
+            warn!("remote search: failed to serialize committed event");
+            return;
+        };
+        let body = json!({"event": value, "namespace": self.setting.namespace});
+        let req = self.request(reqwest::Method::POST, url).json(&body);
+        actix::spawn(async move {
+            match req.send().await {
+                Ok(response) if response.status().is_success() => {}
+                Ok(response) => warn!(status = %response.status(), "remote search ingest rejected"),
+                Err(err) => warn!(error = %err, "remote search ingest failed"),
+            }
+        });
     }
 }
 

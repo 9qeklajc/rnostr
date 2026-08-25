@@ -1,21 +1,35 @@
-use crate::{message::*, setting::SettingWrapper, Reader, Subscriber, Writer};
+use crate::{message::*, setting::SettingWrapper, Extensions, Reader, Subscriber, Writer};
 use actix::prelude::*;
 use nostr_db::{CheckEventResult, Db};
+use parking_lot::RwLock;
 use std::{collections::HashMap, sync::Arc};
 use tracing::info;
 
 /// Server
-#[derive(Debug)]
 pub struct Server {
     id: usize,
     writer: Addr<Writer>,
     reader: Addr<Reader>,
     subscriber: Addr<Subscriber>,
     sessions: HashMap<usize, Recipient<OutgoingMessage>>,
+    extensions: Arc<RwLock<Extensions>>,
 }
 
 impl Server {
+    /// Backward-compatible constructor without extension callbacks.
     pub fn create_with(db: Arc<Db>, setting: SettingWrapper) -> Addr<Server> {
+        Self::create_with_extensions(
+            db,
+            setting,
+            Arc::new(RwLock::new(Extensions::default())),
+        )
+    }
+
+    pub fn create_with_extensions(
+        db: Arc<Db>,
+        setting: SettingWrapper,
+        extensions: Arc<RwLock<Extensions>>,
+    ) -> Addr<Server> {
         let r = setting.read();
         let num = if r.thread.reader == 0 {
             num_cpus::get()
@@ -39,6 +53,7 @@ impl Server {
                 reader,
                 subscriber,
                 sessions: HashMap::new(),
+                extensions,
             }
         })
     }
@@ -184,6 +199,7 @@ impl Handler<WriteEventResult> for Server {
                 self.send_to_client(id, out_msg);
                 // dispatch event to subscriber
                 if let CheckEventResult::Ok(_num) = result {
+                    self.extensions.read().call_event_written(&event);
                     self.subscriber.do_send(Dispatch { id, event });
                 }
             }

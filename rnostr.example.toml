@@ -141,6 +141,12 @@ enabled = false
 enabled = false
 
 # NIP-50 Search extension
-# use carefully. see README.md#search
+# Without service_url: local LMDB keyword search (original behavior).
+# With service_url: committed events are mirrored to the external generic
+# memory service and NIP-50 REQs are served from its Nostr adapter.
 [search]
 enabled = false
+# service_url = "http://192.168.2.88:8301"
+# service_token = "change-me" # optional; matches IMGMEM_API_TOKEN
+# namespace = "nostr"
+# timeout_ms = 10000
